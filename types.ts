@@ -1,13 +1,6 @@
 
 export type Platform = 'YouTube' | 'TikTok' | 'Douyin' | 'Reels';
 
-export interface AppConfig {
-  deepseekKey: string;
-  arkKey: string;
-  arkModel: string;
-  deepseekEndpoint: string;
-}
-
 export interface Scene {
   id: string;
   time: string;
@@ -15,6 +8,9 @@ export interface Scene {
   visualKeywords: string[];
   imagePrompt: string;
   imageUrl?: string;
+  audioUrl?: string;
+  sfxPrompt?: string;
+  sfxUrl?: string;
 }
 
 export interface HistoryItem<T> {
@@ -26,7 +22,6 @@ export interface HistoryItem<T> {
 
 export interface WorkflowState {
   step: number;
-  config: AppConfig;
   input: {
     content: string;
     platform: Platform;
@@ -48,6 +43,9 @@ export interface WorkflowState {
     coverPrompt: string;
     coverUrl?: string;
   };
+  settings: {
+    elevenLabsApiKey: string;
+  };
   history: {
     analysis: HistoryItem<WorkflowState['analysis']>[];
     script: HistoryItem<WorkflowState['script']>[];
@@ -58,12 +56,6 @@ export interface WorkflowState {
 
 export const INITIAL_STATE: WorkflowState = {
   step: 1,
-  config: {
-    deepseekKey: '',
-    arkKey: '',
-    arkModel: 'doubao-seedream-4-5-251128',
-    deepseekEndpoint: 'https://api.deepseek.com/v1'
-  },
   input: {
     content: '',
     platform: 'YouTube'
@@ -83,6 +75,9 @@ export const INITIAL_STATE: WorkflowState = {
     description: '',
     tags: [],
     coverPrompt: ''
+  },
+  settings: {
+    elevenLabsApiKey: ''
   },
   history: {
     analysis: [],

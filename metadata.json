@@ -1,5 +1,7 @@
 {
   "name": "AI Video Workflow Master",
   "description": "A high-efficiency, human-in-the-loop video creation workflow using Gemini AI for script analysis, scene splitting, and asset generation.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "microphone"
+  ]
 }

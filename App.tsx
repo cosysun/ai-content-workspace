@@ -1,59 +1,82 @@
 
-import React, { useState, useEffect } from 'react';
-import { INITIAL_STATE, WorkflowState, Platform, Scene, HistoryItem, AppConfig } from './types';
+import React, { useState, useEffect, useRef } from 'react';
+import { INITIAL_STATE, WorkflowState, Platform, Scene, HistoryItem } from './types';
 import * as api from './apiService';
+import * as db from './dbService';
+import JSZip from 'jszip';
 import { 
   CheckCircle2, 
   ChevronRight, 
   Loader2, 
   Video, 
   MessageSquare, 
-  Layout, 
   Image as ImageIcon, 
-  Settings, 
   AlertCircle,
   FileText,
   Save,
   Wand2,
   History,
-  RotateCcw,
-  Clock,
   X,
   ShieldCheck,
   Zap,
   Brush,
   RefreshCw,
+  Hash,
+  Volume2,
+  Mic,
+  Music,
+  Play,
+  StopCircle,
+  Upload,
+  Square,
+  Trash2,
+  Download,
+  Settings as SettingsIcon,
   ExternalLink,
-  Hash
+  Key,
+  ShieldAlert
 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const [state, setState] = useState<WorkflowState>(() => {
-    const saved = localStorage.getItem('ai_video_workflow_state');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return { 
-          ...INITIAL_STATE, 
-          ...parsed, 
-          config: { ...INITIAL_STATE.config, ...parsed.config },
-          scenes: Array.isArray(parsed.scenes) ? parsed.scenes : []
-        };
-      } catch (e) {
-        return INITIAL_STATE;
-      }
-    }
-    return INITIAL_STATE;
-  });
-
+  const [state, setState] = useState<WorkflowState>(INITIAL_STATE);
+  const [isReady, setIsReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
-  const [showSettings, setShowSettings] = useState(!state.config.deepseekKey || !state.config.arkKey);
+  const [showSettings, setShowSettings] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState(false);
 
+  // Load state from IndexedDB on mount
   useEffect(() => {
-    localStorage.setItem('ai_video_workflow_state', JSON.stringify(state));
-  }, [state]);
+    const init = async () => {
+      const saved = await db.loadState();
+      if (saved) {
+        setState({
+          ...INITIAL_STATE,
+          ...saved,
+          scenes: Array.isArray(saved.scenes) ? saved.scenes : [],
+          settings: { ...INITIAL_STATE.settings, ...saved.settings }
+        });
+      }
+      setIsReady(true);
+    };
+    init();
+  }, []);
+
+  // Save state to IndexedDB whenever it changes
+  useEffect(() => {
+    if (isReady) {
+      db.saveState(state);
+    }
+  }, [state, isReady]);
+
+  const handleClearData = async () => {
+    if (confirm('确定要清除所有进度并重置吗？此操作无法撤销。')) {
+      await db.clearState();
+      setState(INITIAL_STATE);
+      window.location.reload();
+    }
+  };
 
   const steps = [
     { id: 1, name: '输入素材', icon: FileText },
@@ -61,7 +84,7 @@ const App: React.FC = () => {
     { id: 3, name: '口播文稿', icon: MessageSquare },
     { id: 4, name: '分镜规划', icon: Brush },
     { id: 5, name: '生成素材', icon: ImageIcon },
-    { id: 6, name: '发布包装', icon: Settings },
+    { id: 6, name: '发布包装', icon: Hash },
   ];
 
   const saveToHistory = (stepId: number, data: any, note: string) => {
@@ -75,7 +98,7 @@ const App: React.FC = () => {
     };
     setState(prev => ({
       ...prev,
-      history: { ...prev.history, [key]: [newItem, ...prev.history[key as keyof typeof prev.history]].slice(0, 10) }
+      history: { ...prev.history, [key]: [newItem, ...prev.history[key as keyof typeof prev.history]].slice(0, 5) }
     }));
   };
 
@@ -87,45 +110,120 @@ const App: React.FC = () => {
     return null;
   };
 
+  const downloadProjectZip = async () => {
+    const zip = new JSZip();
+    
+    // 1. Create Editing Instructions (剪辑说明.MD)
+    let editMd = `# 视频剪辑说明: ${state.metadata.videoTitle || '未命名项目'}\n\n`;
+    editMd += `## 项目信息\n`;
+    editMd += `- **目标平台**: ${state.input.platform}\n`;
+    editMd += `- **核心描述**: ${state.metadata.description}\n`;
+    editMd += `- **标签话题**: ${state.metadata.tags.join(', ')}\n\n`;
+    editMd += `## 分镜脚本与素材索引\n\n`;
+
+    // 2. Create Publishing Instructions (发布说明.MD)
+    let publishMd = `# 视频发布说明: ${state.metadata.videoTitle || state.script.title || '未命名项目'}\n\n`;
+    publishMd += `## 基础要素\n`;
+    publishMd += `- **视频标题**: ${state.metadata.videoTitle || state.script.title}\n`;
+    publishMd += `- **发布平台**: ${state.input.platform}\n`;
+    publishMd += `- **建议标签**: ${state.metadata.tags.map(t => '#' + t).join(' ')}\n\n`;
+    publishMd += `## 视频简介 (Description)\n`;
+    publishMd += `\`\`\`text\n${state.metadata.description}\n\`\`\`\n\n`;
+    publishMd += `## 完整口播稿 (Transcript)\n`;
+    publishMd += `\`\`\`text\n${state.script.content}\n\`\`\`\n\n`;
+    publishMd += `## 封面图提示词 (Cover AI Prompt)\n`;
+    publishMd += `> ${state.metadata.coverPrompt}\n`;
+
+    const imagesFolder = zip.folder("images");
+    const audioFolder = zip.folder("audio");
+
+    for (let i = 0; i < state.scenes.length; i++) {
+      const scene = state.scenes[i];
+      const sceneIdx = i + 1;
+      
+      editMd += `### 场景 ${sceneIdx} [${scene.time}]\n`;
+      editMd += `> **口播文稿**: ${scene.narration}\n\n`;
+      editMd += `- **画面构思**: ${scene.imagePrompt}\n`;
+      editMd += `- **预期音效**: ${scene.sfxPrompt || '无'}\n`;
+      editMd += `- **视觉文件**: \`images/scene_${sceneIdx}.png\`\n`;
+      if (scene.audioUrl) editMd += `- **口播音频**: \`audio/narration_${sceneIdx}.wav\`\n`;
+      if (scene.sfxUrl) editMd += `- **音效文件**: \`audio/sfx_${sceneIdx}.wav\`\n`;
+      editMd += `\n---\n\n`;
+
+      const getBase64 = (dataUrl: string) => dataUrl.split(',')[1];
+
+      if (scene.imageUrl) {
+        imagesFolder?.file(`scene_${sceneIdx}.png`, getBase64(scene.imageUrl), { base64: true });
+      }
+      if (scene.audioUrl) {
+        audioFolder?.file(`narration_${sceneIdx}.wav`, getBase64(scene.audioUrl), { base64: true });
+      }
+      if (scene.sfxUrl) {
+        audioFolder?.file(`sfx_${sceneIdx}.wav`, getBase64(scene.sfxUrl), { base64: true });
+      }
+    }
+
+    if (state.metadata.coverUrl) {
+      zip.file("cover_image.png", state.metadata.coverUrl.split(',')[1], { base64: true });
+      editMd += `### 封面文件\n- \`cover_image.png\`\n- **封面提示词**: ${state.metadata.coverPrompt}\n`;
+    }
+
+    zip.file("剪辑说明.MD", editMd);
+    zip.file("发布说明.MD", publishMd);
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(content);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${state.metadata.videoTitle || 'AI_Video_Project'}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const handleNext = async () => {
     setLoading(true);
     setError(null);
     try {
       if (state.step === 1) {
         if (!state.input.content) throw new Error("请输入创作内容");
-        const analysis = await api.analyzeContent(state.config, state.input.content, state.input.platform);
+        const analysis = await api.analyzeContent(state.input.content, state.input.platform);
         setState(prev => ({ ...prev, step: 2, analysis }));
         saveToHistory(2, analysis, "内容初始分析");
       } else if (state.step === 2) {
         saveToHistory(2, state.analysis, "分析确认");
-        const script = await api.generateViralScript(state.config, state.analysis, state.input.platform);
+        const script = await api.generateViralScript(state.analysis, state.input.platform);
         setState(prev => ({ ...prev, step: 3, script }));
         saveToHistory(3, script, "文稿生成");
       } else if (state.step === 3) {
         saveToHistory(3, state.script, "文稿确认");
-        const scenes = await api.splitScenes(state.config, state.script.content);
-        if (!Array.isArray(scenes)) throw new Error("分镜数据格式错误：未能获得分镜列表");
+        const scenes = await api.splitScenes(state.script.content);
+        if (!Array.isArray(scenes)) throw new Error("分镜数据格式错误");
         setState(prev => ({ ...prev, step: 4, scenes }));
         saveToHistory(4, scenes, "分镜切分");
       } else if (state.step === 4) {
         saveToHistory(4, state.scenes, "分镜审核");
-        const visuals = await api.generateVisualAssets(state.config, state.scenes);
-        if (!Array.isArray(visuals)) throw new Error("视觉提示词生成错误：未能获得提示词列表");
+        const visuals = await api.generateVisualAssets(state.scenes);
         const updatedScenes = state.scenes.map(scene => {
           const match = visuals.find((v: any) => v.id === scene.id);
           return match ? { ...scene, ...match } : scene;
         });
         setState(prev => ({ ...prev, step: 5, scenes: updatedScenes }));
-        saveToHistory(5, updatedScenes, "视觉提示词生成");
+        saveToHistory(5, updatedScenes, "视觉与音效建议生成");
       } else if (state.step === 5) {
         saveToHistory(5, state.scenes, "素材确认");
-        const packaging = await api.generatePackaging(state.config, state.script.content, state.input.platform);
+        const packaging = await api.generatePackaging(state.script.content, state.input.platform);
         setState(prev => ({ ...prev, step: 6, metadata: packaging }));
         saveToHistory(6, packaging, "发布方案生成");
+      } else if (state.step === 6) {
+        setLoading(true);
+        await downloadProjectZip();
+        setExportSuccess(true);
+        setTimeout(() => setExportSuccess(false), 3000);
       }
     } catch (err: any) {
       console.error("Workflow Error:", err);
-      setError(err.message || '操作失败，请检查配置');
+      setError(err.message || '操作失败');
     } finally {
       setLoading(false);
     }
@@ -142,6 +240,17 @@ const App: React.FC = () => {
     setShowHistory(false);
   };
 
+  if (!isReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+          <p className="text-sm font-bold text-slate-400">正在恢复工作进度...</p>
+        </div>
+      </div>
+    );
+  }
+
   const currentHistoryKey = getHistoryKey(state.step);
   const currentHistory = currentHistoryKey ? state.history[currentHistoryKey as keyof typeof state.history] : [];
 
@@ -153,8 +262,8 @@ const App: React.FC = () => {
             <Video className="text-white w-6 h-6" />
           </div>
           <div>
-            <h1 className="text-lg font-bold tracking-tight">AI 创作工作流 <span className="text-xs font-normal text-slate-400">DeepSeek + Doubao</span></h1>
-            <p className="text-[10px] text-slate-400 font-medium">人工审核驱动 • 手绘风格引擎</p>
+            <h1 className="text-lg font-bold tracking-tight">AI 创作工作流 <span className="text-xs font-normal text-slate-400">Gemini Native</span></h1>
+            <p className="text-[10px] text-slate-400 font-medium">全方位 AI 素材引擎 • 人工审核驱动</p>
           </div>
         </div>
         
@@ -166,8 +275,11 @@ const App: React.FC = () => {
             </button>
           )}
           <div className="h-6 w-px bg-slate-200" />
-          <button onClick={() => setShowSettings(true)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all">
-            <Settings className="w-5 h-5" />
+          <button onClick={() => setShowSettings(true)} className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all" title="应用设置">
+            <SettingsIcon className="w-4 h-4" />
+          </button>
+          <button onClick={handleClearData} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all" title="重置项目">
+            <Trash2 className="w-4 h-4" />
           </button>
           <div className="h-6 w-px bg-slate-200" />
           <span className="text-xs font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded">STEP {state.step}</span>
@@ -192,7 +304,14 @@ const App: React.FC = () => {
         </nav>
 
         <div className="flex-1 overflow-y-auto p-8 bg-[#fcfdfe]">
-          <div className="max-w-4xl mx-auto pb-24">
+          <div className="max-w-4xl mx-auto pb-24 relative">
+            {exportSuccess && (
+              <div className="fixed bottom-24 right-8 z-50 bg-emerald-500 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-in fade-in slide-in-from-bottom duration-300">
+                <CheckCircle2 className="w-5 h-5" />
+                <span className="font-bold">项目已成功导出 ZIP！</span>
+              </div>
+            )}
+
             {error && (
               <div className="mb-6 bg-red-50 border border-red-200 text-red-700 p-6 rounded-[2rem] flex flex-col gap-4 animate-in fade-in zoom-in duration-300">
                 <div className="flex items-center gap-3">
@@ -200,14 +319,9 @@ const App: React.FC = () => {
                   <h4 className="font-bold">生成过程中遇到问题</h4>
                 </div>
                 <p className="text-sm font-medium opacity-80 leading-relaxed">{error}</p>
-                <div className="flex gap-2">
-                  <button onClick={() => { setError(null); handleNext(); }} className="flex items-center gap-2 px-4 py-2 bg-red-100 hover:bg-red-200 rounded-xl text-xs font-bold transition-all">
-                    <RefreshCw className="w-3 h-3" /> 重试
-                  </button>
-                  <button onClick={() => setShowSettings(true)} className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 rounded-xl text-xs font-bold text-slate-700 transition-all">
-                    <Settings className="w-3 h-3" /> 检查 API 配置
-                  </button>
-                </div>
+                <button onClick={() => { setError(null); handleNext(); }} className="w-fit flex items-center gap-2 px-4 py-2 bg-red-100 hover:bg-red-200 rounded-xl text-xs font-bold transition-all">
+                  <RefreshCw className="w-3 h-3" /> 立即重试
+                </button>
               </div>
             )}
 
@@ -215,7 +329,7 @@ const App: React.FC = () => {
             {state.step === 2 && <AnalysisStep state={state} setState={setState} />}
             {state.step === 3 && <ScriptStep state={state} setState={setState} />}
             {state.step === 4 && <SceneStep state={state} setState={setState} />}
-            {state.step === 5 && <VisualAssetStep state={state} setState={setState} />}
+            {state.step === 5 && <VisualAssetStep state={state} setState={setState} onOpenSettings={() => setShowSettings(true)} />}
             {state.step === 6 && <PackagingStep state={state} setState={setState} />}
 
             <div className="mt-12 flex items-center justify-between border-t border-slate-100 pt-8">
@@ -229,11 +343,11 @@ const App: React.FC = () => {
               <button
                 onClick={handleNext}
                 disabled={loading || (state.step === 1 && !state.input.content)}
-                className="flex items-center gap-2 px-10 py-3 bg-slate-900 hover:bg-black text-white rounded-2xl shadow-xl transition-all font-bold disabled:opacity-50"
+                className={`flex items-center gap-2 px-10 py-3 rounded-2xl shadow-xl transition-all font-bold disabled:opacity-50 ${state.step === 6 ? 'bg-emerald-600 hover:bg-emerald-700 text-white' : 'bg-slate-900 hover:bg-black text-white'}`}
               >
-                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                {state.step === 6 ? '确认方案' : '确认内容并下一步'}
-                <ChevronRight className="w-4 h-4" />
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : state.step === 6 ? <Download className="w-4 h-4" /> : <CheckCircle2 className="w-4 h-4" />}
+                {state.step === 6 ? '打包导出 ZIP' : '确认内容并下一步'}
+                {state.step < 6 && <ChevronRight className="w-4 h-4" />}
               </button>
             </div>
           </div>
@@ -242,32 +356,83 @@ const App: React.FC = () => {
         {showHistory && (
           <HistoryDrawer history={currentHistory} onRevert={(data) => revertTo(currentHistoryKey!, data)} onClose={() => setShowHistory(false)} />
         )}
+
         {showSettings && (
-          <SettingsModal config={state.config} setConfig={(c) => setState(prev => ({ ...prev, config: c }))} onClose={() => setShowSettings(false)} />
+          <SettingsModal 
+            settings={state.settings} 
+            onSave={(newSettings) => setState(prev => ({ ...prev, settings: newSettings }))} 
+            onClose={() => setShowSettings(false)} 
+          />
         )}
       </main>
     </div>
   );
 };
 
-// --- Step Components ---
+const SettingsModal = ({ settings, onSave, onClose }: any) => {
+  const [val, setVal] = useState(settings.elevenLabsApiKey);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden animate-in zoom-in duration-200">
+        <div className="p-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-xl font-black text-slate-900 flex items-center gap-2">
+              <SettingsIcon className="w-5 h-5 text-indigo-600" />
+              应用设置
+            </h3>
+            <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><X className="w-5 h-5" /></button>
+          </div>
+          
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center justify-between">
+                ElevenLabs API Key
+                <a href="https://elevenlabs.io/app/sound-generation" target="_blank" className="text-indigo-600 hover:underline flex items-center gap-1">获取密钥 <ExternalLink className="w-3 h-3" /></a>
+              </label>
+              <div className="relative group">
+                <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300 group-focus-within:text-indigo-500 transition-colors" />
+                <input 
+                  type="password"
+                  className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all"
+                  placeholder="输入您的 ElevenLabs 密钥..."
+                  value={val}
+                  onChange={(e) => setVal(e.target.value)}
+                />
+              </div>
+              <p className="text-[10px] text-slate-400 font-medium">密钥将仅保存在您的本地浏览器中 (IndexedDB)，不会上传到我们的服务器。</p>
+            </div>
+          </div>
+
+          <button 
+            onClick={() => { onSave({ ...settings, elevenLabsApiKey: val }); onClose(); }}
+            className="w-full py-4 bg-slate-900 text-white rounded-2xl text-sm font-bold shadow-xl hover:bg-black transition-all flex items-center justify-center gap-2"
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            保存配置
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const InputStep = ({ state, setState }: any) => (
   <div className="space-y-8 animate-in fade-in duration-500">
     <div className="space-y-2">
-      <h2 className="text-3xl font-black text-slate-900 tracking-tight">内容创作入口</h2>
-      <p className="text-slate-500 font-medium">输入原始内容或链接，AI 将进行语义拆解与创作。</p>
+      <h2 className="text-3xl font-black text-slate-900 tracking-tight">创作灵感入口</h2>
+      <p className="text-slate-500 font-medium">输入原始内容、链接或大纲，Gemini 将为您深度拆解。</p>
     </div>
     <div className="bg-white p-1 rounded-3xl border border-slate-200 shadow-xl shadow-slate-200/50">
       <textarea
         className="w-full h-80 p-6 rounded-2xl focus:ring-0 border-none outline-none text-lg resize-none placeholder:text-slate-300"
-        placeholder="粘贴内容链接或直接输入灵感..."
+        placeholder="在这里输入您的创意点子..."
         value={state.input.content}
         onChange={(e) => setState((prev: any) => ({ ...prev, input: { ...prev.input, content: e.target.value } }))}
       />
       <div className="p-4 border-t border-slate-50 flex items-center justify-between bg-slate-50/50 rounded-b-2xl">
         <div className="flex gap-2">
-          {['YouTube', 'TikTok', 'Douyin'].map(p => (
+          {['YouTube', 'TikTok', 'Douyin', 'Reels'].map(p => (
             <button key={p} onClick={() => setState((prev: any) => ({ ...prev, input: { ...prev.input, platform: p } }))}
               className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${state.input.platform === p ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200' : 'bg-white text-slate-500 border border-slate-200'}`}>
               {p}
@@ -283,10 +448,10 @@ const InputStep = ({ state, setState }: any) => (
 const AnalysisStep = ({ state, setState }: any) => (
   <div className="space-y-8 animate-in fade-in duration-500">
     <div className="flex items-center justify-between">
-      <h2 className="text-2xl font-black text-slate-900">内容深度策略分析</h2>
-      <div className="flex items-center gap-2 px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-[10px] font-black uppercase tracking-widest border border-indigo-100">
+      <h2 className="text-2xl font-black text-slate-900">核心策略分析</h2>
+      <div className="flex items-center gap-2 px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full text-[10px] font-black uppercase border border-indigo-100">
         <ShieldCheck className="w-3 h-3" />
-        AI Content Strategy
+        Gemini AI Strategist
       </div>
     </div>
     {['coreInfo', 'audience', 'strategy'].map((field) => (
@@ -307,12 +472,12 @@ const AnalysisStep = ({ state, setState }: any) => (
 
 const ScriptStep = ({ state, setState }: any) => (
   <div className="space-y-8 animate-in fade-in duration-500">
-    <h2 className="text-2xl font-black text-slate-900">口播文稿生成</h2>
+    <h2 className="text-2xl font-black text-slate-900">口播文稿</h2>
     <div className="space-y-4">
       <input
         className="w-full p-6 bg-white border border-slate-200 rounded-2xl text-xl font-bold focus:ring-2 focus:ring-indigo-500 outline-none shadow-sm"
         value={state.script.title}
-        placeholder="输入爆款标题..."
+        placeholder="视频标题..."
         onChange={(e) => setState((prev: any) => ({ ...prev, script: { ...prev.script, title: e.target.value } }))}
       />
       <div className="bg-white border border-slate-200 rounded-3xl p-8 shadow-sm">
@@ -332,7 +497,7 @@ const SceneStep = ({ state, setState }: any) => {
     <div className="space-y-8 animate-in fade-in duration-500">
       <h2 className="text-2xl font-black text-slate-900 flex items-center gap-3">
         <Brush className="w-6 h-6 text-indigo-600" />
-        分镜规划预演
+        分镜规划
       </h2>
       <div className="grid gap-4">
         {scenes.map((scene: Scene, idx: number) => (
@@ -351,61 +516,252 @@ const SceneStep = ({ state, setState }: any) => {
             </div>
           </div>
         ))}
-        {scenes.length === 0 && <p className="text-slate-400 italic text-center py-12">暂无分镜数据</p>}
       </div>
     </div>
   );
 };
 
-const VisualAssetStep = ({ state, setState }: any) => {
+const VisualAssetStep = ({ state, setState, onOpenSettings }: any) => {
   const scenes = Array.isArray(state.scenes) ? state.scenes : [];
   const [genId, setGenId] = useState<string | null>(null);
+  const [audioGenId, setAudioGenId] = useState<string | null>(null);
+  const [sfxGenId, setSfxGenId] = useState<string | null>(null);
+  const [sfxErrorId, setSfxErrorId] = useState<string | null>(null);
   
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingId, setRecordingId] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
   const handleGen = async (idx: number) => {
     setGenId(scenes[idx].id);
     try {
-      const url = await api.generateImage(state.config, scenes[idx].imagePrompt);
-      const n = [...scenes]; n[idx].imageUrl = url; setState((p: any) => ({ ...p, scenes: n }));
+      const url = await api.generateImage(scenes[idx].imagePrompt);
+      setState((prev: any) => {
+        const n = [...prev.scenes];
+        n[idx].imageUrl = url || '';
+        return { ...prev, scenes: n };
+      });
     } catch (e: any) { alert(e.message); }
     finally { setGenId(null); }
   };
 
+  const handleAudioGen = async (idx: number) => {
+    setAudioGenId(scenes[idx].id);
+    try {
+      const url = await api.generateSpeech(scenes[idx].narration);
+      setState((prev: any) => {
+        const n = [...prev.scenes];
+        n[idx].audioUrl = url;
+        return { ...prev, scenes: n };
+      });
+    } catch (e: any) { alert(e.message); }
+    finally { setAudioGenId(null); }
+  };
+
+  const handleSfxGen = async (idx: number) => {
+    setSfxGenId(scenes[idx].id);
+    setSfxErrorId(null);
+    try {
+      const url = await api.generateSfx(scenes[idx].sfxPrompt || 'background sound', state.settings.elevenLabsApiKey);
+      setState((prev: any) => {
+        const n = [...prev.scenes];
+        n[idx].sfxUrl = url;
+        return { ...prev, scenes: n };
+      });
+    } catch (e: any) { 
+      if (e.message === "MissingElevenLabsKey") {
+        onOpenSettings();
+      } else if (e.message === "ElevenLabsPermissionsError") {
+        setSfxErrorId(scenes[idx].id);
+      } else {
+        alert(e.message); 
+      }
+    }
+    finally { setSfxGenId(null); }
+  };
+
+  const startRecording = async (idx: number) => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const url = reader.result as string;
+          setState((prev: any) => {
+            const n = [...prev.scenes];
+            n[idx].audioUrl = url;
+            return { ...prev, scenes: n };
+          });
+        };
+        reader.readAsDataURL(blob);
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      recorder.start();
+      setIsRecording(true);
+      setRecordingId(scenes[idx].id);
+    } catch (err) {
+      alert('无法开启麦克风：' + err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      setRecordingId(null);
+    }
+  };
+
+  const handleSfxUpload = (e: React.ChangeEvent<HTMLInputElement>, idx: number) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const url = reader.result as string;
+        setState((prev: any) => {
+          const n = [...prev.scenes];
+          n[idx].sfxUrl = url;
+          return { ...prev, scenes: n };
+        });
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      <h2 className="text-2xl font-black text-slate-900">视觉素材生成</h2>
-      <div className="grid gap-8">
+      <h2 className="text-2xl font-black text-slate-900">视觉与音频素材</h2>
+      <div className="grid gap-12">
         {scenes.map((scene: Scene, idx: number) => (
-          <div key={scene.id} className="bg-white border border-slate-200 rounded-[2rem] overflow-hidden flex flex-col md:flex-row shadow-sm hover:shadow-xl transition-all border-l-4 border-l-indigo-600">
-            <div className="flex-1 p-8 space-y-4">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black text-indigo-600 bg-indigo-50 px-2 py-1 rounded">SCENE {idx + 1}</span>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{scene.time}</span>
-              </div>
-              <p className="text-xs font-medium text-slate-400 italic">"{scene.narration}"</p>
-              <textarea className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-xs font-bold text-indigo-900 outline-none focus:ring-1 focus:ring-indigo-300 transition-all" rows={3} value={scene.imagePrompt}
-                onChange={(e) => {
-                  const n = [...scenes]; n[idx].imagePrompt = e.target.value; setState((p: any) => ({ ...p, scenes: n }));
-                }} />
-            </div>
-            <div className="w-full md:w-72 h-72 bg-slate-50 border-l border-slate-100 relative group shrink-0">
-              {scene.imageUrl ? (
-                <img src={scene.imageUrl} className="w-full h-full object-cover transition-all group-hover:scale-105" alt="Preview" />
-              ) : (
-                <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-3">
-                  <Brush className="w-8 h-8 opacity-20" />
-                  <span className="text-[10px] font-black uppercase tracking-widest">Awaiting Render</span>
+          <div key={scene.id} className="bg-white border border-slate-200 rounded-[2.5rem] overflow-hidden flex flex-col shadow-xl border-l-[10px] border-l-indigo-600">
+            <div className="p-8 flex flex-col lg:flex-row gap-8">
+              <div className="flex-1 space-y-6">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg">SCENE {idx + 1}</span>
+                  <span className="text-xs font-bold text-slate-400 uppercase">{scene.time}</span>
                 </div>
-              )}
-              <div className="absolute inset-0 bg-slate-900/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all backdrop-blur-[2px]">
-                <button disabled={genId === scene.id} onClick={() => handleGen(idx)} className="bg-white text-slate-900 px-6 py-3 rounded-2xl text-xs font-black shadow-2xl hover:scale-105 transition-all flex items-center gap-2 disabled:opacity-50">
-                  {genId === scene.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4 text-indigo-600" />}
-                  手绘风格生成
-                </button>
+                
+                <p className="text-sm font-medium text-slate-700 bg-slate-50 p-4 rounded-2xl italic leading-relaxed border border-slate-100">
+                  "{scene.narration}"
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-indigo-600 uppercase flex items-center gap-2">
+                      <Brush className="w-3 h-3" /> 画面描述
+                    </label>
+                    <textarea className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-xs font-bold text-slate-600 resize-none focus:ring-2 focus:ring-indigo-500/20 outline-none" rows={3} value={scene.imagePrompt}
+                      onChange={(e) => {
+                        const n = [...scenes]; n[idx].imagePrompt = e.target.value; setState((p: any) => ({ ...p, scenes: n }));
+                      }} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-violet-600 uppercase flex items-center gap-2">
+                      <Music className="w-3 h-3" /> 音效建议
+                    </label>
+                    <textarea className="w-full p-4 bg-violet-50/30 border border-violet-100/50 rounded-2xl text-xs font-bold text-slate-600 resize-none focus:ring-2 focus:ring-violet-500/20 outline-none" rows={3} value={scene.sfxPrompt || ''}
+                      onChange={(e) => {
+                        const n = [...scenes]; n[idx].sfxPrompt = e.target.value; setState((p: any) => ({ ...p, scenes: n }));
+                      }} />
+                  </div>
+                </div>
+
+                {sfxErrorId === scene.id && (
+                  <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex items-start gap-3 animate-in fade-in slide-in-from-top-2 duration-300">
+                    <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <p className="text-xs font-bold text-amber-900">ElevenLabs 权限不足 (missing_permissions)</p>
+                      <p className="text-[10px] text-amber-700 leading-relaxed font-medium">您的 API 密钥不支持音效生成功能。请检查您的 ElevenLabs 订阅计划或确保已启用 Sound Effects API。您可以尝试手动上传音效素材。</p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="pt-4 space-y-4">
+                  <div className="flex items-center gap-3">
+                    <button disabled={genId === scene.id} onClick={() => handleGen(idx)} className="flex-1 flex items-center justify-center gap-2 py-3 bg-indigo-600 text-white rounded-xl text-xs font-black shadow-lg hover:bg-indigo-700 transition-all disabled:opacity-50">
+                      {genId === scene.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <ImageIcon className="w-4 h-4" />} AI 生成插画
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button disabled={audioGenId === scene.id} onClick={() => handleAudioGen(idx)} className="flex-1 flex items-center justify-center gap-2 py-3 bg-slate-100 text-slate-900 rounded-xl text-xs font-black border border-slate-200 hover:bg-slate-200 transition-all disabled:opacity-50">
+                      {audioGenId === scene.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4 text-indigo-600" />} AI 口播
+                    </button>
+                    {isRecording && recordingId === scene.id ? (
+                      <button onClick={stopRecording} className="flex-1 flex items-center justify-center gap-2 py-3 bg-red-600 text-white rounded-xl text-xs font-black shadow-lg animate-pulse">
+                        <Square className="w-4 h-4 fill-white" /> 停止录音
+                      </button>
+                    ) : (
+                      <button onClick={() => startRecording(idx)} className="flex-1 flex items-center justify-center gap-2 py-3 bg-white text-slate-900 rounded-xl text-xs font-black border border-slate-200 hover:bg-slate-50 transition-all">
+                        <Mic className="w-4 h-4 text-indigo-600" /> 人工录制
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <button disabled={sfxGenId === scene.id} onClick={() => handleSfxGen(idx)} className="flex-1 flex items-center justify-center gap-2 py-3 bg-violet-600 text-white rounded-xl text-xs font-black shadow-lg hover:bg-violet-700 transition-all disabled:opacity-50">
+                      {sfxGenId === scene.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Volume2 className="w-4 h-4" />} AI 音效
+                    </button>
+                    <label className="flex-1 flex items-center justify-center gap-2 py-3 bg-white text-slate-900 rounded-xl text-xs font-black border border-slate-200 hover:bg-slate-50 transition-all cursor-pointer">
+                      <Upload className="w-4 h-4 text-violet-600" /> 人工上传
+                      <input type="file" className="hidden" accept="audio/*" onChange={(e) => handleSfxUpload(e, idx)} />
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="w-full lg:w-80 space-y-4 shrink-0">
+                <div className="aspect-video bg-slate-50 rounded-3xl overflow-hidden relative group border border-slate-100 shadow-inner">
+                  {scene.imageUrl ? (
+                    <img src={scene.imageUrl} className="w-full h-full object-cover" alt="Preview" />
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-300 gap-3">
+                      <ImageIcon className="w-10 h-10 opacity-20" />
+                      <span className="text-[10px] font-black uppercase">等待生成</span>
+                    </div>
+                  )}
+                </div>
+                <div className="bg-slate-50 p-4 rounded-3xl border border-slate-100 space-y-4">
+                  <div className="space-y-2">
+                    <span className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-2">
+                      <Mic className="w-3 h-3" /> 口播轨道
+                    </span>
+                    {scene.audioUrl ? (
+                      <audio key={scene.audioUrl} controls className="w-full h-8"><source src={scene.audioUrl} /></audio>
+                    ) : (
+                      <div className="h-8 bg-slate-100/50 rounded-lg border border-dashed border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-300">
+                        未生成/录制
+                      </div>
+                    )}
+                  </div>
+                  <div className="space-y-2 pt-2 border-t border-slate-200/50">
+                    <span className="text-[10px] font-black text-slate-400 uppercase flex items-center gap-2">
+                      <Music className="w-3 h-3" /> 音效轨道
+                    </span>
+                    {scene.sfxUrl ? (
+                      <audio key={scene.sfxUrl} controls className="w-full h-8"><source src={scene.sfxUrl} /></audio>
+                    ) : (
+                      <div className="h-8 bg-slate-100/50 rounded-lg border border-dashed border-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-300">
+                        未生成/上传
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         ))}
-        {scenes.length === 0 && <p className="text-slate-400 italic text-center py-12">暂无分镜数据</p>}
       </div>
     </div>
   );
@@ -416,72 +772,59 @@ const PackagingStep = ({ state, setState }: any) => {
   const handleGen = async () => {
     setGen(true);
     try {
-      const url = await api.generateImage(state.config, state.metadata.coverPrompt);
-      setState((prev: any) => ({ ...prev, metadata: { ...prev.metadata, coverUrl: url } }));
+      const url = await api.generateImage(state.metadata.coverPrompt);
+      setState((prev: any) => ({ ...prev, metadata: { ...prev.metadata, coverUrl: url || '' } }));
     } catch (e: any) { alert(e.message); }
     finally { setGen(false); }
   };
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
-      <h2 className="text-2xl font-black text-slate-900">最后一步：发布包装与封面</h2>
+      <h2 className="text-2xl font-black text-slate-900">发布包装</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <div className="space-y-6">
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 space-y-4 shadow-sm">
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
-               <FileText className="w-3 h-3" /> 发布标题
+               <FileText className="w-3 h-3" /> 导出标题
              </label>
              <input className="w-full p-0 border-none focus:ring-0 text-lg font-bold text-slate-800" value={state.metadata.videoTitle} onChange={e => setState((p: any) => ({ ...p, metadata: { ...p.metadata, videoTitle: e.target.value } }))} />
           </div>
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 space-y-4 shadow-sm">
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
-               <Hash className="w-3 h-3" /> 关键词 (Keywords)
+               <Hash className="w-3 h-3" /> 热门话题
              </label>
              <div className="flex flex-wrap gap-2">
                {state.metadata.tags.map((tag: string, i: number) => (
                  <span key={i} className="px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-xs font-bold border border-indigo-100">#{tag}</span>
                ))}
-               {state.metadata.tags.length === 0 && <span className="text-xs text-slate-300 italic">暂无关键词</span>}
              </div>
           </div>
-          <div className="bg-white p-6 rounded-3xl border border-slate-200 space-y-4 shadow-sm">
-             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">视频简介</label>
+          <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-4">
+             <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">详情描述</label>
              <textarea className="w-full p-0 border-none focus:ring-0 text-sm font-medium text-slate-600 leading-relaxed" rows={5} value={state.metadata.description} onChange={e => setState((p: any) => ({ ...p, metadata: { ...p.metadata, description: e.target.value } }))} />
           </div>
         </div>
-        <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl shadow-slate-100 flex flex-col gap-6">
-           <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">封面图设计 (手绘风格)</label>
+        <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-xl flex flex-col gap-6">
+           <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">封面设计</label>
            <div className="aspect-[4/5] bg-slate-50 rounded-2xl overflow-hidden relative group border border-slate-100 shadow-inner">
              {state.metadata.coverUrl ? <img src={state.metadata.coverUrl} className="w-full h-full object-cover" alt="Cover" /> : <div className="h-full flex items-center justify-center text-slate-200"><Brush className="w-12 h-12" /></div>}
              <button disabled={gen} onClick={handleGen} className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-all flex items-center justify-center text-white text-xs font-black">
-                {gen ? <Loader2 className="animate-spin" /> : '重新渲染封面'}
+                {gen ? <Loader2 className="animate-spin" /> : '渲染高清封面'}
              </button>
            </div>
            <textarea className="w-full p-4 bg-slate-50 border border-slate-100 rounded-xl text-[10px] font-bold text-slate-400" rows={2} value={state.metadata.coverPrompt} onChange={e => setState((p: any) => ({ ...p, metadata: { ...p.metadata, coverPrompt: e.target.value } }))} />
         </div>
       </div>
-      <div className="bg-slate-900 p-10 rounded-[3rem] text-white flex flex-col md:flex-row items-center justify-between gap-8 shadow-2xl shadow-slate-300 border border-white/10">
-        <div className="space-y-2">
-          <h3 className="text-2xl font-black">工作流已就绪</h3>
-          <p className="text-slate-400 text-sm max-w-sm">文案与视觉素材已完成版本固化。您可以下载资源包开始剪辑。</p>
-        </div>
-        <button className="px-12 py-5 bg-white text-slate-900 rounded-3xl font-black shadow-2xl hover:scale-105 active:scale-95 transition-all flex items-center gap-3">
-          <Save className="w-5 h-5 text-indigo-600" />
-          下载完整创作包
-        </button>
-      </div>
     </div>
   );
 };
-
-// --- Helper Components ---
 
 const HistoryDrawer = ({ history, onRevert, onClose }: any) => (
   <div className="fixed inset-0 z-50 flex justify-end">
     <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" onClick={onClose} />
     <div className="relative w-96 bg-white h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-300">
       <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-        <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">版本记录</h3>
+        <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">历史记录</h3>
         <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-lg transition-colors"><X className="w-5 h-5" /></button>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -500,78 +843,5 @@ const HistoryDrawer = ({ history, onRevert, onClose }: any) => (
     </div>
   </div>
 );
-
-const SettingsModal = ({ config, setConfig, onClose }: any) => {
-  const [localConfig, setLocalConfig] = useState(config);
-
-  const handleSave = () => {
-    setConfig(localConfig);
-    onClose();
-  };
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-lg bg-white rounded-[2.5rem] shadow-2xl p-10 animate-in zoom-in-95 duration-200 max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-start mb-6">
-          <div>
-            <h3 className="text-2xl font-black text-slate-900">API 引擎配置</h3>
-            <p className="text-xs font-medium text-slate-400">请确保填写正确的 API Key 和端点</p>
-          </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        
-        <div className="space-y-6">
-          <section className="space-y-4">
-            <h4 className="flex items-center gap-2 text-xs font-black uppercase text-indigo-600 tracking-widest border-b pb-2">
-              <Zap className="w-3 h-3" /> DeepSeek (文案引擎)
-            </h4>
-            <div className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">API Key</label>
-                <input className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none" 
-                  type="password" value={localConfig.deepseekKey} onChange={e => setLocalConfig({ ...localConfig, deepseekKey: e.target.value })} placeholder="sk-..." />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase flex justify-between">
-                  API Endpoint 
-                  <a href="https://api-docs.deepseek.com/" target="_blank" className="text-indigo-500 flex items-center gap-1 hover:underline">文档 <ExternalLink className="w-2 h-2" /></a>
-                </label>
-                <input className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none" 
-                  value={localConfig.deepseekEndpoint} onChange={e => setLocalConfig({ ...localConfig, deepseekEndpoint: e.target.value })} placeholder="https://api.deepseek.com/v1" />
-              </div>
-            </div>
-          </section>
-
-          <section className="space-y-4">
-            <h4 className="flex items-center gap-2 text-xs font-black uppercase text-violet-600 tracking-widest border-b pb-2">
-              <ImageIcon className="w-3 h-3" /> 豆包 / Volcengine (视觉引擎)
-            </h4>
-            <div className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Ark API Key (火山引擎)</label>
-                <input className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none" 
-                  type="password" value={localConfig.arkKey} onChange={e => setLocalConfig({ ...localConfig, arkKey: e.target.value })} placeholder="填写火山引擎 Access Key 或 Token" />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-400 uppercase">Model ID (接入点名称)</label>
-                <input className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none" 
-                  value={localConfig.arkModel} onChange={e => setLocalConfig({ ...localConfig, arkModel: e.target.value })} placeholder="ep-202xxxxx-xxxxx" />
-                <p className="text-[10px] text-slate-400">注：请在火山引擎 Ark 平台创建模型接入点后获取 ID</p>
-              </div>
-            </div>
-          </section>
-        </div>
-
-        <button onClick={handleSave} className="w-full mt-10 py-4 bg-slate-900 text-white rounded-2xl font-black shadow-xl shadow-slate-200 hover:bg-black transition-all flex items-center justify-center gap-2">
-          <Save className="w-4 h-4" />
-          保存配置并开始
-        </button>
-      </div>
-    </div>
-  );
-};
 
 export default App;

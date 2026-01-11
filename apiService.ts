@@ -1,186 +1,298 @@
 
-import { AppConfig, Platform } from "./types";
+import { GoogleGenAI, Modality, Type } from "@google/genai";
+import { Platform, Scene } from "./types";
+
+// Always use process.env.API_KEY directly as per guidelines.
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 /**
- * Utility to extract JSON from a string, handling markdown code blocks if present.
+ * Utility to convert a Blob to a Data URL
  */
-const extractJson = (text: string) => {
-  try {
-    // Attempt direct parse
-    return JSON.parse(text);
-  } catch (e) {
-    // Try to find JSON block in markdown
-    const jsonMatch = text.match(/```json\s?([\s\S]*?)\s?```/) || text.match(/{[\s\S]*}/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[1] || jsonMatch[0]);
-      } catch (innerE) {
-        throw new Error("模型返回的 JSON 格式不正确，无法解析。");
-      }
-    }
-    throw new Error("无法从回复中提取有效的 JSON 数据。");
-  }
+const blobToDataURL = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 };
 
-const callDeepSeek = async (config: AppConfig, systemPrompt: string, userPrompt: string, isJson: boolean = true) => {
-  if (!config.deepseekKey) throw new Error("请先在设置中配置 DeepSeek API Key");
-  
-  const endpoint = config.deepseekEndpoint.endsWith('/') 
-    ? config.deepseekEndpoint.slice(0, -1) 
-    : config.deepseekEndpoint;
+export const analyzeContent = async (content: string, platform: Platform) => {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `你是一位专业的短视频内容战略专家。请分析以下内容并为 ${platform} 平台制定策略。\n内容原文：${content}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          coreInfo: { type: Type.STRING, description: '核心信息的简明总结' },
+          audience: { type: Type.STRING, description: '目标受众画像分析' },
+          strategy: { type: Type.STRING, description: '针对平台的具体创作建议' },
+        },
+        required: ["coreInfo", "audience", "strategy"]
+      }
+    }
+  });
+  return JSON.parse(response.text);
+};
 
-  const body = {
-    model: "deepseek-chat",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt }
-    ],
-    temperature: 0.6,
-    max_tokens: 4000,
-    // DeepSeek JSON mode requires the word "json" in the prompt and MUST be an object.
-    response_format: isJson ? { type: "json_object" } : undefined
-  };
+export const generateViralScript = async (analysis: any, platform: Platform) => {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-preview",
+    contents: `你是一位资深的爆款视频编剧。根据以下分析结果，为 ${platform} 创作一份具有高度吸引力的视频口播稿。\n分析背景：${JSON.stringify(analysis)}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING, description: '吸引人的视频标题' },
+          content: { type: Type.STRING, description: '完整的口播文案' },
+        },
+        required: ["title", "content"]
+      }
+    }
+  });
+  return JSON.parse(response.text);
+};
 
+export const splitScenes = async (script: string) => {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-pro-preview",
+    contents: `你是一位视频剪辑导演。请将以下口播稿拆分为多个高度精细化的视觉场景。
+    
+    【核心要求】：
+    1. **极短步频**：为了保证短视频的完播率和视觉冲击力，每个分镜的时长必须控制在 **3-5 秒以内**。
+    2. **密集切镜**：将长句子拆分成多个更短的动作或视觉点，每个分镜只对应一小句口播内容。
+    3. **完整覆盖**：确保整篇口播稿被完整拆分，不遗漏任何文字。
+    4. **时间标注**：请在 time 字段准确标注预估的起止时间点，格式如 "00:00-00:04"。
+    
+    口播稿全文：${script}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          scenes: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                time: { type: Type.STRING, description: '预计起止时间，如 00:00-00:04' },
+                narration: { type: Type.STRING, description: '该极短分镜对应的口播文字段落' },
+              },
+              required: ["id", "time", "narration"]
+            }
+          }
+        },
+        required: ["scenes"]
+      }
+    }
+  });
+  const data = JSON.parse(response.text);
+  return data.scenes || [];
+};
+
+export const generateVisualAssets = async (scenes: any[]) => {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `你是一位视觉与创意总监。请为每个分镜设计匹配的视觉描述和背景音效建议。分镜列表：${JSON.stringify(scenes)}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          visuals: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.STRING },
+                visualKeywords: { type: Type.ARRAY, items: { type: Type.STRING }, description: '3-5个英文视觉关键词' },
+                imagePrompt: { type: Type.STRING, description: '详细的手绘插画风格绘图提示词 (英文)' },
+                sfxPrompt: { type: Type.STRING, description: '背景音效描述 (英文)' },
+              },
+              required: ["id", "visualKeywords", "imagePrompt", "sfxPrompt"]
+            }
+          }
+        },
+        required: ["visuals"]
+      }
+    }
+  });
+  const data = JSON.parse(response.text);
+  return data.visuals || [];
+};
+
+export const generatePackaging = async (script: string, platform: Platform) => {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `你是一位社交媒体运营专家。请为视频生成发布包装内容。口播稿：${script}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          videoTitle: { type: Type.STRING, description: '最终发布标题' },
+          description: { type: Type.STRING, description: '视频简介与话题' },
+          tags: { type: Type.ARRAY, items: { type: Type.STRING }, description: '标签数组' },
+          coverPrompt: { type: Type.STRING, description: '手绘风格封面图提示词 (英文)' },
+        },
+        required: ["videoTitle", "description", "tags", "coverPrompt"]
+      }
+    }
+  });
+  return JSON.parse(response.text);
+};
+
+export const generateImage = async (prompt: string) => {
+  const styledPrompt = `Hand-drawn illustration style, artistic sketch, clean lines, professional digital art, ${prompt}`;
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-image',
+    contents: { parts: [{ text: styledPrompt }] },
+    config: {
+      imageConfig: { aspectRatio: "16:9" }
+    }
+  });
+
+  const candidates = response.candidates || [];
+  if (candidates.length > 0) {
+    const parts = candidates[0].content?.parts || [];
+    for (const part of parts) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+  }
+  return null;
+};
+
+export const generateSpeech = async (text: string) => {
   try {
-    const response = await fetch(`${endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.deepseekKey.trim()}`
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text: `朗读这段文案：${text}` }] }],
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+        },
       },
-      body: JSON.stringify(body)
     });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorData;
-      try {
-        errorData = JSON.parse(errorText);
-      } catch (e) {
-        errorData = { error: { message: errorText } };
+    let base64Audio;
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        base64Audio = part.inlineData.data;
+        break;
       }
-      
-      const msg = errorData.error?.message || errorData.message || response.statusText;
-      throw new Error(`DeepSeek API 调用失败 (${response.status}): ${msg}`);
     }
 
-    const data = await response.json();
-    const resultText = data.choices[0].message.content;
+    if (!base64Audio) throw new Error("未生成语音数据");
 
-    if (isJson) {
-      return extractJson(resultText);
-    }
-    return resultText;
-  } catch (err: any) {
-    console.error("DeepSeek API Error:", err);
-    if (err.name === 'TypeError') {
-      throw new Error("网络请求失败，请检查 API 端点是否正确或是否存在跨域限制。");
-    }
-    throw err;
+    const pcmData = decodeBase64(base64Audio);
+    const wavBlob = createWavBlob(pcmData, 24000);
+    return await blobToDataURL(wavBlob);
+  } catch (error: any) {
+    console.error("Gemini TTS Error:", error);
+    throw error;
   }
 };
 
-export const analyzeContent = async (config: AppConfig, content: string, platform: Platform) => {
-  const system = `你是一位专业的短视频内容战略专家。请分析用户提供的内容，并以 JSON 格式输出。
-JSON 结构必须包含以下字段：
-- "coreInfo": 核心信息的简明总结
-- "audience": 目标受众画像分析
-- "strategy": 针对 ${platform} 平台的具体创作建议`;
-  
-  const user = `内容原文：${content}\n发布平台：${platform}`;
-  return callDeepSeek(config, system, user);
-};
-
-export const generateViralScript = async (config: AppConfig, analysis: any, platform: Platform) => {
-  const system = `你是一位资深的爆款视频编剧。根据分析结果，创作一份具有高度吸引力的视频口播稿。
-以 JSON 格式输出，包含以下字段：
-- "title": 吸引人的视频标题
-- "content": 完整的口播文案`;
-
-  const user = `分析背景：${JSON.stringify(analysis)}\n发布平台：${platform}`;
-  return callDeepSeek(config, system, user);
-};
-
-export const splitScenes = async (config: AppConfig, script: string) => {
-  const system = `你是一位视频剪辑导演。请将口播稿拆分为多个视觉场景。
-必须以 JSON 对象格式输出，其中包含一个名为 "scenes" 的数组。
-每个场景对象包含：
-- "id": 场景序号 (如 "1")
-- "time": 预计时长 (如 "0-5s")
-- "narration": 该场景对应的口播文字
-例如：{"scenes": [{"id": "1", "time": "0-5s", "narration": "..."}]}`;
-
-  const user = `口播稿：${script}`;
-  const result = await callDeepSeek(config, system, user);
-  return result.scenes || [];
-};
-
-export const generateVisualAssets = async (config: AppConfig, scenes: any[]) => {
-  const system = `你是一位视觉艺术家。请为每个分镜设计匹配的视觉描述。
-必须以 JSON 对象格式输出，其中包含一个名为 "visuals" 的数组。
-每个对象包含：
-- "id": 对应的分镜 ID
-- "visualKeywords": 3-5个英文视觉关键词
-- "imagePrompt": 详细的 AI 绘图提示词。必须要求“手绘风格”(Hand-drawn illustration style)。
-例如：{"visuals": [{"id": "1", "visualKeywords": ["sketch", "art"], "imagePrompt": "hand-drawn style..."}]}`;
-
-  const user = `分镜列表：${JSON.stringify(scenes)}`;
-  const result = await callDeepSeek(config, system, user);
-  return result.visuals || [];
-};
-
-export const generatePackaging = async (config: AppConfig, script: string, platform: Platform) => {
-  const system = `你是一位社交媒体运营专家。请为视频生成发布包装。
-以 JSON 格式输出：
-- "videoTitle": 最终发布标题
-- "description": 视频简介与话题
-- "tags": 标签数组
-- "coverPrompt": 详细的手绘风格封面图提示词`;
-
-  const user = `口播稿内容：${script}`;
-  return callDeepSeek(config, system, user);
-};
-
-export const generateImage = async (config: AppConfig, prompt: string) => {
-  if (!config.arkKey) throw new Error("请先在设置中配置 火山引擎 (Ark) API Key");
-
-  const styledPrompt = `手绘插画风格, 细腻的笔触, 艺术感, (hand-drawn illustration style, artistic sketch, textured paper): ${prompt}`;
-
+/**
+ * Generate Sound Effects using ElevenLabs API
+ */
+export const generateSfx = async (prompt: string, customKey?: string) => {
   try {
-    const response = await fetch('https://ark.cn-beijing.volces.com/api/v3/images/generations', {
-      method: 'POST',
+    const elevenLabsKey = customKey?.trim() || (process.env as any).ELEVENLABS_API_KEY;
+    
+    if (!elevenLabsKey) {
+      throw new Error("MissingElevenLabsKey");
+    }
+
+    // ElevenLabs Sound Effects works best with concise English prompts.
+    // Ensure prompt is within reasonable length.
+    const cleanPrompt = prompt.slice(0, 200);
+
+    const response = await fetch("https://api.elevenlabs.io/v1/sound-generation", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.arkKey.trim()}`
+        "Content-Type": "application/json",
+        "xi-api-key": elevenLabsKey,
       },
       body: JSON.stringify({
-        model: config.arkModel,
-        prompt: styledPrompt,
-        sequential_image_generation: "disabled",
-        response_format: "url",
-        size: "2K", 
-        stream: false,
-        watermark: true
-      })
+        text: cleanPrompt,
+        duration_seconds: 5,
+        prompt_influence: 0.3,
+      }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      let errorMsg = response.statusText;
+      let errorDetail = response.statusText;
+      let errorCode = "";
+      
       try {
-        const err = JSON.parse(errorText);
-        errorMsg = err.message || err.error?.message || errorMsg;
-      } catch(e) {}
-      throw new Error(`豆包 API 错误: ${errorMsg}`);
+        const errorJson = JSON.parse(errorText);
+        errorDetail = errorJson.detail?.status || errorJson.detail?.message || errorJson.detail || response.statusText;
+        errorCode = errorJson.detail?.status || "";
+      } catch (e) {}
+
+      if (errorDetail === "missing_permissions" || errorCode === "missing_permissions") {
+        throw new Error("ElevenLabsPermissionsError");
+      }
+      
+      throw new Error(`ElevenLabs 接口错误: ${errorDetail}`);
     }
 
-    const data = await response.json();
-    if (data.data && data.data[0] && data.data[0].url) {
-      return data.data[0].url;
+    const blob = await response.blob();
+    return await blobToDataURL(blob);
+  } catch (error: any) {
+    if (error.message === "MissingElevenLabsKey" || error.message === "ElevenLabsPermissionsError") {
+      throw error;
     }
-    throw new Error("豆包 API 未返回有效的图片链接。");
-  } catch (err: any) {
-    console.error("Doubao API Error:", err);
-    throw err;
+    console.error("ElevenLabs SFX Generation Error:", error);
+    throw error;
   }
 };
+
+function decodeBase64(base64: string): Int16Array {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return new Int16Array(bytes.buffer);
+}
+
+function createWavBlob(pcmData: Int16Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + pcmData.length * 2);
+  const view = new DataView(buffer);
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + pcmData.length * 2, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, pcmData.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < pcmData.length; i++, offset += 2) {
+    view.setInt16(offset, pcmData[i], true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
